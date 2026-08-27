@@ -8,6 +8,8 @@ interface Doc {
   pageContent: string;
   metadata?: {
     source?: string;
+    docType?: string;
+    client?: string;
     loc?: {
       pageNumber?: number;
     };
@@ -18,6 +20,25 @@ interface IMessage {
   role: "user" | "assistant";
   content: string;
   documents?: Doc[];
+}
+
+function sourceLabel(doc: Doc): string {
+  const meta = doc.metadata ?? {};
+  const type = meta.docType === "transcript" ? "Transcript" : "Document";
+  const client =
+    meta.client && meta.client !== "unknown"
+      ? `${meta.client.charAt(0).toUpperCase()}${meta.client.slice(1)}`
+      : null;
+  const parts = [client, type].filter(Boolean).join(" ");
+
+  return [parts, meta.source].filter(Boolean).join(" — ");
+}
+
+function formatSource(doc: Doc): string {
+  const meta = doc.metadata ?? {};
+  const page = meta.loc?.pageNumber;
+  const label = sourceLabel(doc);
+  return page ? `${label} (page ${page})` : label;
 }
 
 export default function ChatComponent() {
@@ -164,23 +185,37 @@ export default function ChatComponent() {
               <p className="whitespace-pre-wrap">{message.content}</p>
 
               {message.documents && message.documents.length > 0 && (
-                <details className="mt-4">
-                  <summary className="cursor-pointer font-medium">
-                    Retrieved Chunks ({message.documents.length})
-                  </summary>
-
-                  <div className="mt-3 space-y-3">
-                    {message.documents.map((doc, i) => (
-                      <div key={i} className="rounded border p-3 text-sm">
-                        <div className="mb-2 text-xs text-muted-foreground">
-                          Page {doc.metadata?.loc?.pageNumber ?? "-"}
-                        </div>
-
-                        <p className="whitespace-pre-wrap">{doc.pageContent}</p>
-                      </div>
-                    ))}
+                <>
+                  <div className="mt-4 rounded border p-3 text-sm">
+                    <div className="font-medium">Sources</div>
+                    <ul className="mt-2 list-inside list-disc space-y-1 text-muted-foreground">
+                      {message.documents.map((doc, i) => (
+                        <li key={i}>{formatSource(doc)}</li>
+                      ))}
+                    </ul>
                   </div>
-                </details>
+
+                  <details className="mt-4">
+                    <summary className="cursor-pointer font-medium">
+                      Retrieved Chunks ({message.documents.length})
+                    </summary>
+
+                    <div className="mt-3 space-y-3">
+                      {message.documents.map((doc, i) => (
+                        <div key={i} className="rounded border p-3 text-sm">
+                          <div className="mb-2 text-xs text-muted-foreground">
+                            {sourceLabel(doc)} · Page{" "}
+                            {doc.metadata?.loc?.pageNumber ?? "-"}
+                          </div>
+
+                          <p className="whitespace-pre-wrap">
+                            {doc.pageContent}
+                          </p>
+                        </div>
+                      ))}
+                    </div>
+                  </details>
+                </>
               )}
             </div>
           </div>

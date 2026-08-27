@@ -3,8 +3,12 @@ import cors from "cors";
 import multer from "multer";
 import { Queue } from "bullmq";
 import { GoogleGenAI } from "@google/genai";
-import { GoogleGenerativeAIEmbeddings } from "@langchain/google-genai";
 import { QdrantVectorStore } from "@langchain/qdrant";
+import {
+  COLLECTION_NAME,
+  QDRANT_URL,
+  createEmbeddings,
+} from "./embeddings.js";
 import "dotenv/config";
 
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
@@ -18,15 +22,12 @@ const ai = new GoogleGenAI({
   apiKey: GEMINI_API_KEY,
 });
 
-const embeddings = new GoogleGenerativeAIEmbeddings({
-  apiKey: GEMINI_API_KEY,
-  model: "gemini-embedding-001",
-});
+const embeddings = createEmbeddings();
 
 const queue = new Queue("file-upload-queue", {
   connection: {
-    host: "localhost",
-    port: 6379,
+    host: process.env.REDIS_HOST ?? "localhost",
+    port: process.env.REDIS_PORT ?? 6379,
   },
 });
 
@@ -51,23 +52,28 @@ app.get("/", (_, res) => {
   });
 });
 
-app.post("/upload/pdf", upload.single("pdf"), async (req, res) => {
+app.post("/upload/pdf", upload.array("pdf", 20), async (req, res) => {
   try {
-    if (!req.file) {
+    const files = req.files ?? [];
+
+    if (!files.length) {
       return res.status(400).json({
         success: false,
         message: "No PDF uploaded",
       });
     }
 
-    await queue.add("file-ready", {
-      filename: req.file.originalname,
-      path: req.file.path,
-    });
+    for (const file of files) {
+      await queue.add("file-ready", {
+        filename: file.originalname,
+        path: file.path,
+      });
+    }
 
     return res.json({
       success: true,
-      message: "PDF Uploaded Successfully",
+      message: `${files.length} PDF${files.length > 1 ? "s" : ""} Uploaded Successfully`,
+      count: files.length,
     });
   } catch (err) {
     console.error(err);
@@ -94,19 +100,27 @@ app.post("/chat", async (req, res) => {
     const vectorStore = await QdrantVectorStore.fromExistingCollection(
       embeddings,
       {
-        url: "http://localhost:6333",
-        collectionName: "langchainjs-testing",
+        url: QDRANT_URL,
+        collectionName: COLLECTION_NAME,
       },
     );
 
     const retriever = vectorStore.asRetriever({
-      k: 3,
+      k: 8,
     });
 
     const docs = await retriever.invoke(query);
 
     const context = docs
-      .map((doc) => doc.pageContent)
+      .map((doc) => {
+        const { source, docType, client } = doc.metadata ?? {};
+        const page = doc.metadata?.loc?.pageNumber;
+
+        return [
+          `[source: ${source ?? "-"} | type: ${docType ?? "-"} | client: ${client ?? "-"} | page: ${page ?? "-"}]`,
+          doc.pageContent,
+        ].join("\n");
+      })
       .join("\n\n----------------------\n\n");
 
     // Stream response
@@ -120,9 +134,15 @@ app.post("/chat", async (req, res) => {
 
       contents: `
             You are an AI RAG: Case Intelligence System.
-            Answer ONLY using the provided PDF context.
-            If the answer isn't present, simply reply:
-            "I couldn't find that information in the PDF."
+            You answer open-ended questions about a set of client transcripts and reference documents.
+            Ground your answer in the provided context below. It comes from multiple sources,
+            each labelled with [source | type | client | page].
+            - Answer the question directly and thoroughly.
+            - If the answer is not present in the context, simply reply:
+              "I couldn't find that information in the provided documents."
+            - Do not use outside knowledge beyond the context.
+            - Where relevant, synthesise across multiple sources (e.g. several client transcripts,
+              or a transcript and a policy document).
 
             Context:
             ${context}
@@ -131,11 +151,14 @@ app.post("/chat", async (req, res) => {
             `,
     });
 
-    // Send retrieved docs first
+    // Send retrieved docs first (with full metadata for evidence)
     res.write(
       JSON.stringify({
         type: "docs",
-        docs,
+        docs: docs.map((doc) => ({
+          pageContent: doc.pageContent,
+          metadata: doc.metadata ?? {},
+        })),
       }) + "\n__DOCS_END__\n",
     );
 
